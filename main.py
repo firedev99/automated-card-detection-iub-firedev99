@@ -1,152 +1,126 @@
-import cv2 
-import pytesseract
-import re
+import cv2
+import easyocr
+import pandas as pd
 
 
-# define Tesseract-OCR path
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
-
-class InitializeDetector():
+class Detector():
     def __init__(self):
-        self.input_image = None
-        self.rois_offsets = {
-            "name": 0.585,
+        self.img = None
+        self.roi_offsets = {
+            "name": 0.572,
             "student_id": 0.67
         }
-        self.labels = {}
-
-
-    # pre process the image before finding the contours 
-    def preprocess_image(self, img, target_size=(1000, 1000)):
-        self.input_image = img.copy()
-        height, width = img.shape[:2]
         
-        # calculate aspect ratio
-        aspect_ratio = width / height
-
-        # resize to target size while preserving aspect ratio
-        if aspect_ratio > 1:
-            new_width = target_size[0]
-            new_height = int(new_width / aspect_ratio)
-        else:
-            new_height = target_size[1]
-            new_width = int(new_height * aspect_ratio)
-
-        img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
-
-
-        self.input_image = img
-        
-        
-
-    # detect id card bounding box based on the largest contours  
-    def detect_id(self):
-        img = self.input_image
- 
-        # covert the image to grayscale
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # apply gaussian blur
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # apply thresholding
-        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-        # find the contours in the 
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # detect the corner
+    def detect_corner(self, img):
+        self.img = img
 
-        # filter out small contours
+        # covert the image to grayscale 
+        gray = cv2.cvtColor(img.copy(), cv2.COLOR_BGR2GRAY)
+
+        # apply gaussian blur 
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+
+        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        # filter out the small contours
         filtered_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 1000]
         filtered_contours.sort(key=cv2.contourArea, reverse=True)
-        
-        if len(filtered_contours) == 0:
-            ValueError('something went wrong, try again!')
 
+
+        # contours sorounding the id card
         id_card_contours = filtered_contours[0]
 
 
-        # get the bounding box of the id card 
-        x, y, w, h = cv2.boundingRect(id_card_contours)
+        return id_card_contours
 
 
-        # Crop the document from the original image
-        cropped_image = img[y:y+h, x:x+w]  
 
-        
-        # x, y, w, h = cv2.boundingRect(filtered_contours[0])
-        # cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        
+    # get the id card 
+    def get_id_card(self, contours):
+        img = self.img 
 
-        self.input_image = cropped_image
-        
+        # detected bounding rectangle
+        x, y, w, h = cv2.boundingRect(contours)
 
+        # cropped detected id card
+        cropped_img = img.copy()[y:y+h, x:x+w] 
+        new_img = cv2.resize(cropped_img, (600, 600), interpolation=cv2.INTER_CUBIC)
 
-    # capitalize text 
-    def capitalize(self, text):
-        words = text.split()
-        camel_case = ' '.join(word.capitalize() for word in words[:])
-        return camel_case
-        
+        return new_img
     
-    # classify text extraction
-    def classify_text(self):
-        img = self.input_image
+
+
+    # recognize text and their label based on their coordinates 
+    def recognize_text(self, img):
         details = []
+
+        # generate an empty data frame
+        df = pd.DataFrame()
+
+        # initialize easyocr
+        reader = easyocr.Reader(['en'], gpu=False)
+
+        # extract the height and width from the image 
         height, width = img.shape[:2]
-        space = int(0.11 * height)
+        # make some gap around the region of interest 
+        space = int(0.12 * height)
 
-        # extract the text from specific coordinates based on region of interest 
-        for cat, offset in self.rois_offsets.items():
-            # get the region of interest (y-axis)
+        # assign label and extract text based on region of interest     
+        for _, (label, offset) in enumerate(self.roi_offsets.items()): 
             roi_y = int(offset * height)
-            # crop the detected labeled text 
-            roi_cropped = img[roi_y:roi_y + space, 0:width]
-
-            # extract the labeled text 
-            text = pytesseract.image_to_string(roi_cropped)
             
-            if cat == "name":
-                text = self.capitalize(text.replace('Student', ''))
-                details.append(text)
+            # crop the area around the detected label
+            roi_cropped = img[roi_y:roi_y + space, 0:width]
+    
+            
+            # extract the text using easy-ocr   
+            results = reader.readtext(roi_cropped)
+            # generate a data frame based on the result       
+            img_df = pd.DataFrame(results, columns=['bbox','text','conf'])
+  
+
+            # modify data frame values         
+            if label == 'name':
+                # get the text id that has max len            
+                long_text_id = img_df['text'].str.len().idxmax()   
+                text = ''.join(img_df['text'][long_text_id]).replace(':', '.')
             else:
-                # extract all digits
-                text = max(re.findall(r'\d+', text))
-                details.append(text)
+                # get the text id that has max len 
+                long_text_id = img_df['text'].str.len().idxmax()
+                text = ''.join(img_df['text'][long_text_id]).replace('ID: ', '')
                 
+                            
+            # append student details and data frame      
+            details.append(text)
+            df = df._append(img_df)
 
-        if len(details) != 2:
-            ValueError('something went wrong')
-            return None
-        
+    
+        return df, details
+    
 
-        self.labels = {
-            "name": details[0],
-            "student_id": details[1]
-        }
-        
-        print(self.labels)
-    
-    
+
 
 
 
 if __name__ == '__main__':
-    img = cv2.imread('samples/random_lost_iub_id_card_3.jpg')
+    test = cv2.imread(r"E:\ML\projects\automated-card-detection-iub-firedev99\samples\random_lost_iub_id_card_4.jpg")
 
-    # initialize detector
-    detector = InitializeDetector()
+    # initialize the detector
+    d = Detector()
 
-    # pre process the image
-    preprocessed_img = detector.preprocess_image(img)
+    # detect corner of the image 
+    detected_id_contours = d.detect_corner(test)
 
-    # detect id card bounding box edges based on contours 
-    contours = detector.detect_id()
+    # get the detected id card 
+    result = d.get_id_card(detected_id_contours)
 
-    # extract data based on specified label
-    detector.classify_text()
+    # recognize the text based on region of interest 
+    df, details = d.recognize_text(result)
 
-
-    cv2.waitKey(0)
-
+    print(details)
 
